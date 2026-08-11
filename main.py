@@ -12,13 +12,13 @@ import os
 
 app = FastAPI()
 
-# Get the frontend URL from environment variables (for Vercel)
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+# Remove the FRONTEND_URL variable, we don't need it anymore for CORS
+# FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 
-# CORS for React frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_URL], # Change to your React port in production
+    # Use regex to allow ALL Vercel URLs and localhost for development
+    allow_origin_regex=r"https://.*\.vercel\.app|http://localhost:\d+",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
