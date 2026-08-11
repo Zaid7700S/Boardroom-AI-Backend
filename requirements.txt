@@ -1,0 +1,11 @@
+fastapi>=0.115.0
+uvicorn>=0.30.0
+langgraph>=0.2.0
+autogen-agentchat>=0.4.0
+autogen-ext[openai]>=0.4.0
+langchain-groq>=0.1.0
+langchain-core>=0.2.0
+supabase>=2.5.0
+matplotlib>=3.8.0
+python-dotenv>=1.0.0
+sse-starlette>=2.1.0
