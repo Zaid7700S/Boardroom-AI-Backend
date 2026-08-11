@@ -18,7 +18,7 @@ FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 # CORS for React frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["FRONTEND_URL"], # Change to your React port in production
+    allow_origins=[FRONTEND_URL], # Change to your React port in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
