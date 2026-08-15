@@ -1,5 +1,6 @@
 import json
 import uuid
+import base64
 from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.responses import Response 
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,18 +30,19 @@ class ProblemRequest(BaseModel):
     groq_api_key: str
 
 def verify_token(authorization: str):
-    """Verifies Supabase JWT and returns user_id"""
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Missing auth token")
+    """Verifies Supabase JWT and returns user_id, or None if guest"""
+    if not authorization or not authorization.startswith("Bearer "):
+        return None # Guest user
+    
     token = authorization.split(" ")[1]
     try:
         # Verify token with Supabase
         res = supabase.auth.get_user(token)
         if not res.user:
-            raise HTTPException(status_code=401, detail="Invalid token")
-        return res.user.id, token
+            return None
+        return res.user.id
     except Exception:
-        raise HTTPException(status_code=401, detail="Invalid token")
+        return None
 
 # Add the Health Check endpoint (HEAD method)
 @app.head("/health")
@@ -49,8 +51,8 @@ async def healthcheck():
 
 @app.post("/api/stream")
 async def stream_boardroom(req: ProblemRequest, authorization: str = Header(None)):
-    """Streams the AutoGen debate, then runs LangGraph, saves to DB, and returns chart."""
-    user_id, token = verify_token(authorization)
+    """Streams the AutoGen debate, then runs LangGraph, saves to DB (if logged in), and returns chart."""
+    user_id = verify_token(authorization)
     
     async def event_generator():
         full_history = ""
@@ -79,29 +81,36 @@ async def stream_boardroom(req: ProblemRequest, authorization: str = Header(None
             }
         )
         
-        # 3. Save to Supabase DB & Storage
-        yield {"event": "status", "data": json.dumps({"message": "Saving to Database..."})}
-        
         chart_bytes = result.get("chart_bytes", b"")
         chart_url = None
+        session_id = "guest_session"
         
-        if chart_bytes:
-            file_name = f"{uuid.uuid4()}.png"
-            # Upload to Supabase Storage
-            supabase.storage.from_("charts").upload(file_name, chart_bytes, {"content-type": "image/png"})
-            # Get Public URL
-            chart_url = supabase.storage.from_("charts").get_public_url(file_name)
-        
-        # Insert Row into Database
-        row_data = {
-            "user_id": user_id,
-            "problem": req.problem,
-            "debate_history": full_history,
-            "action_plan": result["action_plan"],
-            "chart_url": chart_url
-        }
-        db_response = supabase.table("boardroom_sessions").insert(row_data).execute()
-        session_id = db_response.data[0]["id"]
+        if user_id:
+            # 3a. Logged-in user: Save to Supabase DB & Storage
+            yield {"event": "status", "data": json.dumps({"message": "Saving to Database..."})}
+            
+            if chart_bytes:
+                file_name = f"{uuid.uuid4()}.png"
+                # Upload to Supabase Storage
+                supabase.storage.from_("charts").upload(file_name, chart_bytes, {"content-type": "image/png"})
+                # Get Public URL
+                chart_url = supabase.storage.from_("charts").get_public_url(file_name)
+            
+            # Insert Row into Database
+            row_data = {
+                "user_id": user_id,
+                "problem": req.problem,
+                "debate_history": full_history,
+                "action_plan": result["action_plan"],
+                "chart_url": chart_url
+            }
+            db_response = supabase.table("boardroom_sessions").insert(row_data).execute()
+            session_id = db_response.data[0]["id"]
+        else:
+            # 3b. Guest: Convert image to base64 string to send directly to frontend
+            if chart_bytes:
+                base64_str = base64.b64encode(chart_bytes).decode('utf-8')
+                chart_url = f"data:image/png;base64,{base64_str}"
         
         # 4. Send final data to frontend
         yield {
@@ -117,7 +126,10 @@ async def stream_boardroom(req: ProblemRequest, authorization: str = Header(None
 
 @app.get("/api/history")
 async def get_history(authorization: str = Header(None)):
-    """Gets user's past sessions."""
-    user_id, _ = verify_token(authorization)
+    """Gets user's past sessions. Returns empty list for guests."""
+    user_id = verify_token(authorization)
+    if not user_id:
+        return []
+    
     response = supabase.table("boardroom_sessions").select("*").eq("user_id", user_id).order("created_at", desc=True).execute()
     return response.data
