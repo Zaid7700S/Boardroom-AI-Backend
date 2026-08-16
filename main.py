@@ -72,58 +72,68 @@ async def stream_boardroom(req: ProblemRequest, authorization: str = Header(None
 
         # 2. Run LangGraph for Plan and Chart Generation
         yield {"event": "status", "data": json.dumps({"message": "Drafting Strategic Action Plan..."})}
-        app_workflow = build_workflow()
 
-        result = app_workflow.invoke(
-            {
-                "problem": req.problem,
-                "debate_history": full_history,
-                "groq_api_key": req.groq_api_key
+        try:
+            app_workflow = build_workflow()
+
+            result = app_workflow.invoke(
+                {
+                    "problem": req.problem,
+                    "debate_history": full_history,
+                    "groq_api_key": req.groq_api_key
+                }
+            )
+
+            chart_bytes = result.get("chart_bytes", b"")
+            chart_base64_str = base64.b64encode(chart_bytes).decode("utf-8") if chart_bytes else None
+            # No storage bucket in this project - chart is stored/returned inline as base64 for both
+            # guests and logged-in users, rather than uploaded to a bucket that doesn't exist.
+            chart_url = f"data:image/png;base64,{chart_base64_str}" if chart_base64_str else None
+            session_id = "guest_session"
+
+            if user_id:
+                # 3a. Logged-in user: save the plan + each debate turn to Supabase
+                yield {"event": "status", "data": json.dumps({"message": "Saving to Database..."})}
+
+                plan_row = {
+                    "user_id": user_id,
+                    "title": req.problem,
+                    "markdown": result["action_plan"],
+                    "chart_base64": chart_base64_str,
+                }
+                plan_response = supabase.table("plans").insert(plan_row).execute()
+                plan_id = plan_response.data[0]["id"]
+                session_id = plan_id
+
+                if debate_messages:
+                    chat_rows = [
+                        {
+                            "plan_id": plan_id,
+                            "user_id": user_id,
+                            "role": m["agent"],
+                            "content": m["content"],
+                        }
+                        for m in debate_messages
+                    ]
+                    supabase.table("chats").insert(chat_rows).execute()
+
+            # 4. Send final data to frontend
+            yield {
+                "event": "complete",
+                "data": json.dumps({
+                    "session_id": session_id,
+                    "action_plan": result["action_plan"],
+                    "chart_url": chart_url
+                })
             }
-        )
-
-        chart_bytes = result.get("chart_bytes", b"")
-        chart_base64_str = base64.b64encode(chart_bytes).decode("utf-8") if chart_bytes else None
-        # No storage bucket in this project - chart is stored/returned inline as base64 for both
-        # guests and logged-in users, rather than uploaded to a bucket that doesn't exist.
-        chart_url = f"data:image/png;base64,{chart_base64_str}" if chart_base64_str else None
-        session_id = "guest_session"
-
-        if user_id:
-            # 3a. Logged-in user: save the plan + each debate turn to Supabase
-            yield {"event": "status", "data": json.dumps({"message": "Saving to Database..."})}
-
-            plan_row = {
-                "user_id": user_id,
-                "title": req.problem,
-                "markdown": result["action_plan"],
-                "chart_base64": chart_base64_str,
+        except Exception as e:
+            # Without this, an exception here (bad model name, LLM/API failure, DB error) would
+            # silently kill the generator - the frontend never gets a 'complete' event and just
+            # hangs forever on whatever status was last shown. Surface it instead.
+            yield {
+                "event": "error",
+                "data": json.dumps({"message": f"Failed to generate strategy: {str(e)[:300]}"})
             }
-            plan_response = supabase.table("plans").insert(plan_row).execute()
-            plan_id = plan_response.data[0]["id"]
-            session_id = plan_id
-
-            if debate_messages:
-                chat_rows = [
-                    {
-                        "plan_id": plan_id,
-                        "user_id": user_id,
-                        "role": m["agent"],
-                        "content": m["content"],
-                    }
-                    for m in debate_messages
-                ]
-                supabase.table("chats").insert(chat_rows).execute()
-
-        # 4. Send final data to frontend
-        yield {
-            "event": "complete",
-            "data": json.dumps({
-                "session_id": session_id,
-                "action_plan": result["action_plan"],
-                "chart_url": chart_url
-            })
-        }
 
     return EventSourceResponse(event_generator())
 
