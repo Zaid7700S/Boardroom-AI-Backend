@@ -5,7 +5,7 @@ from autogen_agentchat.conditions import MaxMessageTermination
 from autogen_ext.models.openai import OpenAIChatCompletionClient
 
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
-MODEL_SMART = "llama-3.3-70b-versatile"
+MODEL_SMART = "openai/gpt-oss-120b"
 
 AGENTS_DATA = {
     "CEO": {"name": "CEO", "system_prompt": "You are the CEO. Focus on big-picture vision, market dominance, and company reputation. You are decisive. ONLY speak for yourself. DO NOT repeat what others said. DO NOT include other people's names in your response. You may use **bold** for emphasis. Keep responses to 2-3 sentences."},
@@ -16,7 +16,7 @@ AGENTS_DATA = {
 
 groq_model_info = {
     "vision": False, "function_calling": True, "json_output": True,
-    "family": "unknown", "structured_output": True, "context_window": 8000,
+    "family": "unknown", "structured_output": True, "context_window": 131072,
 }
 
 async def stream_boardroom_debate(problem: str, groq_api_key: str):

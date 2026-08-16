@@ -1,20 +1,15 @@
 import json
-import uuid
 import base64
-from fastapi import FastAPI, HTTPException, Header, Request
-from fastapi.responses import Response 
+from fastapi import FastAPI, Header
+from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
 from pydantic import BaseModel
 from supabase_client import supabase
 from agent_factory import stream_boardroom_debate
 from workflow import build_workflow
-import os
 
 app = FastAPI()
-
-# Remove the FRONTEND_URL variable, we don't need it anymore for CORS
-# FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 
 app.add_middleware(
     CORSMiddleware,
@@ -25,18 +20,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 class ProblemRequest(BaseModel):
     problem: str
     groq_api_key: str
 
+
 def verify_token(authorization: str):
     """Verifies Supabase JWT and returns user_id, or None if guest"""
     if not authorization or not authorization.startswith("Bearer "):
-        return None # Guest user
-    
-    token = authorization.split(" ")[1]
+        return None  # Guest user
+
+    parts = authorization.split(" ")
+    if len(parts) != 2:
+        return None
+
+    token = parts[1]
     try:
-        # Verify token with Supabase
         res = supabase.auth.get_user(token)
         if not res.user:
             return None
@@ -44,25 +44,27 @@ def verify_token(authorization: str):
     except Exception:
         return None
 
-# Add the Health Check endpoint (HEAD method)
+
 @app.head("/health")
 async def healthcheck():
     return Response(status_code=200)
+
 
 @app.post("/api/stream")
 async def stream_boardroom(req: ProblemRequest, authorization: str = Header(None)):
     """Streams the AutoGen debate, then runs LangGraph, saves to DB (if logged in), and returns chart."""
     user_id = verify_token(authorization)
-    
+
     async def event_generator():
         full_history = ""
-        
+        debate_messages = []  # [{agent, content}, ...] - kept as structured data, not just the joined string
+
         # 1. Stream the AutoGen Debate
         async for msg in stream_boardroom_debate(req.problem, req.groq_api_key):
             if msg["agent"] == "HISTORY":
                 full_history = msg["content"]
             else:
-                # Yield SSE event to frontend
+                debate_messages.append({"agent": msg["agent"], "content": msg["content"]})
                 yield {
                     "event": "debate",
                     "data": json.dumps({"agent": msg["agent"], "content": msg["content"]})
@@ -71,8 +73,7 @@ async def stream_boardroom(req: ProblemRequest, authorization: str = Header(None
         # 2. Run LangGraph for Plan and Chart Generation
         yield {"event": "status", "data": json.dumps({"message": "Drafting Strategic Action Plan..."})}
         app_workflow = build_workflow()
-        
-        # Pass groq_api_key directly into the state dictionary
+
         result = app_workflow.invoke(
             {
                 "problem": req.problem,
@@ -80,38 +81,40 @@ async def stream_boardroom(req: ProblemRequest, authorization: str = Header(None
                 "groq_api_key": req.groq_api_key
             }
         )
-        
+
         chart_bytes = result.get("chart_bytes", b"")
-        chart_url = None
+        chart_base64_str = base64.b64encode(chart_bytes).decode("utf-8") if chart_bytes else None
+        # No storage bucket in this project - chart is stored/returned inline as base64 for both
+        # guests and logged-in users, rather than uploaded to a bucket that doesn't exist.
+        chart_url = f"data:image/png;base64,{chart_base64_str}" if chart_base64_str else None
         session_id = "guest_session"
-        
+
         if user_id:
-            # 3a. Logged-in user: Save to Supabase DB & Storage
+            # 3a. Logged-in user: save the plan + each debate turn to Supabase
             yield {"event": "status", "data": json.dumps({"message": "Saving to Database..."})}
-            
-            if chart_bytes:
-                file_name = f"{uuid.uuid4()}.png"
-                # Upload to Supabase Storage
-                supabase.storage.from_("charts").upload(file_name, chart_bytes, {"content-type": "image/png"})
-                # Get Public URL
-                chart_url = supabase.storage.from_("charts").get_public_url(file_name)
-            
-            # Insert Row into Database
-            row_data = {
+
+            plan_row = {
                 "user_id": user_id,
-                "problem": req.problem,
-                "debate_history": full_history,
-                "action_plan": result["action_plan"],
-                "chart_url": chart_url
+                "title": req.problem,
+                "markdown": result["action_plan"],
+                "chart_base64": chart_base64_str,
             }
-            db_response = supabase.table("boardroom_sessions").insert(row_data).execute()
-            session_id = db_response.data[0]["id"]
-        else:
-            # 3b. Guest: Convert image to base64 string to send directly to frontend
-            if chart_bytes:
-                base64_str = base64.b64encode(chart_bytes).decode('utf-8')
-                chart_url = f"data:image/png;base64,{base64_str}"
-        
+            plan_response = supabase.table("plans").insert(plan_row).execute()
+            plan_id = plan_response.data[0]["id"]
+            session_id = plan_id
+
+            if debate_messages:
+                chat_rows = [
+                    {
+                        "plan_id": plan_id,
+                        "user_id": user_id,
+                        "role": m["agent"],
+                        "content": m["content"],
+                    }
+                    for m in debate_messages
+                ]
+                supabase.table("chats").insert(chat_rows).execute()
+
         # 4. Send final data to frontend
         yield {
             "event": "complete",
@@ -124,12 +127,48 @@ async def stream_boardroom(req: ProblemRequest, authorization: str = Header(None
 
     return EventSourceResponse(event_generator())
 
+
 @app.get("/api/history")
 async def get_history(authorization: str = Header(None)):
-    """Gets user's past sessions. Returns empty list for guests."""
+    """Gets user's past sessions (plans + their debate turns). Returns empty list for guests."""
     user_id = verify_token(authorization)
     if not user_id:
         return []
-    
-    response = supabase.table("boardroom_sessions").select("*").eq("user_id", user_id).order("created_at", desc=True).execute()
-    return response.data
+
+    plans_response = (
+        supabase.table("plans")
+        .select("*")
+        .eq("user_id", user_id)
+        .order("created_at", desc=True)
+        .execute()
+    )
+    plans = plans_response.data
+
+    plan_ids = [p["id"] for p in plans]
+    chats_by_plan = {}
+    if plan_ids:
+        chats_response = (
+            supabase.table("chats")
+            .select("*")
+            .in_("plan_id", plan_ids)
+            .order("created_at")
+            .execute()
+        )
+        for c in chats_response.data:
+            chats_by_plan.setdefault(c["plan_id"], []).append(
+                {"agent": c["role"], "content": c["content"]}
+            )
+
+    sessions = []
+    for p in plans:
+        chart_b64 = p.get("chart_base64")
+        sessions.append({
+            "id": p["id"],
+            "created_at": p["created_at"],
+            "problem": p["title"],
+            "action_plan": p["markdown"],
+            "chart_url": f"data:image/png;base64,{chart_b64}" if chart_b64 else None,
+            "messages": chats_by_plan.get(p["id"], []),
+        })
+
+    return sessions
