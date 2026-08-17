@@ -1,5 +1,6 @@
 import json
 import base64
+import os
 from fastapi import FastAPI, Header
 from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,10 +12,22 @@ from workflow import build_workflow
 
 app = FastAPI()
 
+# Exact production origin(s), comma-separated, e.g. "https://boardroom-ai.vercel.app,https://boardroomai.com"
+_frontend_origins = os.getenv("FRONTEND_URL", "")
+ALLOWED_ORIGINS = [o.strip() for o in _frontend_origins.split(",") if o.strip()]
+
+# Optional: preview-deployment regex scoped to *your* Vercel project only, e.g.
+# "https://boardroom-ai-.*\.vercel\.app" - NOT any *.vercel.app site. Also allows
+# localhost for local development. Leave PREVIEW_ORIGIN_REGEX unset to disable
+# preview-deployment access entirely and only trust ALLOWED_ORIGINS.
+_preview_regex = os.getenv("PREVIEW_ORIGIN_REGEX", "")
+_localhost_regex = r"http://localhost:\d+"
+ALLOW_ORIGIN_REGEX = f"{_preview_regex}|{_localhost_regex}" if _preview_regex else _localhost_regex
+
 app.add_middleware(
     CORSMiddleware,
-    # Use regex to allow ALL Vercel URLs and localhost for development
-    allow_origin_regex=r"https://.*\.vercel\.app|http://localhost:\d+",
+    allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=ALLOW_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
