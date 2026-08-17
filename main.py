@@ -72,21 +72,21 @@ async def stream_boardroom(req: ProblemRequest, authorization: str = Header(None
         full_history = ""
         debate_messages = []  # [{agent, content}, ...] - kept as structured data, not just the joined string
 
-        # 1. Stream the AutoGen Debate
-        async for msg in stream_boardroom_debate(req.problem, req.groq_api_key):
-            if msg["agent"] == "HISTORY":
-                full_history = msg["content"]
-            else:
-                debate_messages.append({"agent": msg["agent"], "content": msg["content"]})
-                yield {
-                    "event": "debate",
-                    "data": json.dumps({"agent": msg["agent"], "content": msg["content"]})
-                }
-
-        # 2. Run LangGraph for Plan and Chart Generation
-        yield {"event": "status", "data": json.dumps({"message": "Drafting Strategic Action Plan..."})}
-
         try:
+            # 1. Stream the AutoGen Debate
+            async for msg in stream_boardroom_debate(req.problem, req.groq_api_key):
+                if msg["agent"] == "HISTORY":
+                    full_history = msg["content"]
+                else:
+                    debate_messages.append({"agent": msg["agent"], "content": msg["content"]})
+                    yield {
+                        "event": "debate",
+                        "data": json.dumps({"agent": msg["agent"], "content": msg["content"]})
+                    }
+
+            # 2. Run LangGraph for Plan and Chart Generation
+            yield {"event": "status", "data": json.dumps({"message": "Drafting Strategic Action Plan..."})}
+
             app_workflow = build_workflow()
 
             result = app_workflow.invoke(
