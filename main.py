@@ -13,8 +13,11 @@ from workflow import build_workflow
 app = FastAPI()
 
 # Exact production origin(s), comma-separated, e.g. "https://boardroom-ai.vercel.app,https://boardroomai.com"
+# Trailing slashes are stripped: browsers never include one in the Origin header
+# (it's always just scheme+host+port), so "https://x.vercel.app/" would otherwise
+# never match and silently break CORS for that origin.
 _frontend_origins = os.getenv("FRONTEND_URL", "")
-ALLOWED_ORIGINS = [o.strip() for o in _frontend_origins.split(",") if o.strip()]
+ALLOWED_ORIGINS = [o.strip().rstrip("/") for o in _frontend_origins.split(",") if o.strip()]
 
 # Optional: preview-deployment regex scoped to *your* Vercel project only, e.g.
 # "https://boardroom-ai-.*\.vercel\.app" - NOT any *.vercel.app site. Also allows
